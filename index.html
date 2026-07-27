@@ -145,7 +145,7 @@
                 </div>
 
                 <div class="card">
-                    <h3 class="card-title">二、问题类型TOP5分析</h3>
+                    <h3 class="card-title">二、问题类型TOP6分析（正向3+负向3）</h3>
                     <div id="problemTypeTop5"></div>
                 </div>
 
@@ -155,12 +155,17 @@
                 </div>
 
                 <div class="card">
-                    <h3 class="card-title">四、坐席绩效排名</h3>
+                    <h3 class="card-title">四、客户ID重复来访差评量级 TOP5</h3>
+                    <div id="repeatCustomerTop5"></div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">五、坐席绩效排名</h3>
                     <div id="employeeRanking"></div>
                 </div>
 
                 <div class="card">
-                    <h3 class="card-title">五、员工能力短板分析</h3>
+                    <h3 class="card-title">六、员工能力短板分析</h3>
                     <div class="employee-selector">
                         <label>选择坐席:</label>
                         <select id="weaknessEmployeeSelect" onchange="generateWeaknessAnalysis()">
@@ -327,6 +332,7 @@
                 else if (k === '满意度') normalized.satisfaction = parseFloat(row[k]) || 0;
                 else if (k === '满意度原因') normalized.satisfactionReason = row[k];
                 else if (k === '咨询会话id') normalized.conversationId = row[k];
+                else if (k === '客户ID' || k === '用户ID' || k === '客户id' || k === '用户id') normalized.customerId = row[k];
                 else if (k === '是否已解决') normalized.isSolved = row[k];
                 else if (k === '首次响应时长（秒）') normalized.responseTime = parseFloat(row[k]) || 0;
                 else if (k === '平均响应时长（秒）') normalized.avgResponseTime = parseFloat(row[k]) || 0;
@@ -466,6 +472,7 @@
             generateSkillGroupOverview();
             generateProblemTypeTop5();
             generateSatisfactionDetail();
+            generateRepeatCustomerTop5();
             generateEmployeeRanking();
             generateDailySummary();
         }
@@ -495,7 +502,7 @@
                 }
                 if (r.consultOrder && String(r.consultOrder).trim() !== '') groups[g].consultOrders++;
                 if (r.satisfaction > 0 && r.satisfaction <= 3) groups[g].badReviewOrders++;
-                
+
                 var reasonStr = r.satisfactionReason || '';
                 if (r.satisfaction >= 4 && reasonStr) {
                     reasonStr.split(/[;,，；]/).forEach(function(reason) {
@@ -510,6 +517,9 @@
                     });
                 }
             });
+
+            var totalRated = filteredData.filter(function(r) { return r.satisfaction > 0; }).length;
+            var TARGET_NSS = 83;
             
             var html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px;">';
             
@@ -522,7 +532,8 @@
                 var dissatisfied = filteredData.filter(function(r) { return (r.skillGroup || '未分类') === name && r.satisfaction === 2; }).length;
                 var veryDissatisfied = filteredData.filter(function(r) { return (r.skillGroup || '未分类') === name && r.satisfaction === 1; }).length;
                 var groupNSS = data.ratedCount > 0 ? (verySatisfied - normal - dissatisfied - veryDissatisfied) / data.ratedCount * 100 : 0;
-                
+                var nssContrib = totalRated > 0 && data.ratedCount > 0 ? ((groupNSS - TARGET_NSS) * data.ratedCount / totalRated) : 0;
+
                 var posTop = Object.entries(data.reasons.positive).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 5);
                 var negTop = Object.entries(data.reasons.negative).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 5);
                 
@@ -532,6 +543,7 @@
                 html += '<div><span style="color: #6b7280; font-size: 12px;">NSS</span><br><strong style="color: ' + (groupNSS >= 0 ? '#10b981' : '#ef4444') + '">' + (data.ratedCount > 0 ? groupNSS.toFixed(1) + '%' : '-') + '</strong></div>';
                 html += '<div><span style="color: #6b7280; font-size: 12px;">已评价</span><br><strong>' + data.ratedCount + '</strong></div>';
                 html += '<div><span style="color: #6b7280; font-size: 12px;">差评工单数量</span><br><strong style="color: ' + (data.badReviewOrders > 0 ? '#ef4444' : '#10b981') + '">' + data.badReviewOrders + '</strong></div>';
+                html += '<div><span style="color: #6b7280; font-size: 12px;">NSS偏差贡献</span><br><strong style="color: ' + (nssContrib >= 0 ? '#10b981' : '#ef4444') + '">' + (data.ratedCount > 0 ? nssContrib.toFixed(1) + '%' : '-') + '</strong></div>';
                 html += '</div>';
                 
                 html += '<div style="margin-bottom: 10px;"><span style="color: #6b7280; font-size: 12px;">满意度分布:</span>';
@@ -592,17 +604,47 @@
         function generateProblemTypeTop5() {
             var types = {};
             filteredData.forEach(function(r) {
-                var t = r.problemType || '其他';
-                types[t] = (types[t] || 0) + 1;
+                var raw = r.problemType || '其他';
+                var subs = String(raw).split(/[;；,，]/).map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+                if (subs.length === 0) subs = ['其他'];
+                subs.forEach(function(t) {
+                    if (!types[t]) types[t] = { count: 0, ratedCount: 0, verySatisfied: 0, satisfied: 0, normal: 0, dissatisfied: 0, veryDissatisfied: 0 };
+                    var d = types[t];
+                    d.count++;
+                    if (r.satisfaction > 0) {
+                        d.ratedCount++;
+                        if (r.satisfaction === 5) d.verySatisfied++;
+                        else if (r.satisfaction === 4) d.satisfied++;
+                        else if (r.satisfaction === 3) d.normal++;
+                        else if (r.satisfaction === 2) d.dissatisfied++;
+                        else if (r.satisfaction === 1) d.veryDissatisfied++;
+                    }
+                });
             });
-            
-            var sorted = Object.entries(types).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 5);
+
+            var totalRated = filteredData.filter(function(r) { return r.satisfaction > 0; }).length;
+            var TARGET_NSS = 83;
             var total = filteredData.length;
-            
-            var html = '<table><thead><tr><th>排名</th><th>问题类型</th><th>工单量</th><th>占比</th><th>占比条形</th></tr></thead><tbody>';
+
+            var all = Object.keys(types).map(function(name) {
+                var d = types[name];
+                var nss = d.ratedCount > 0 ? (d.verySatisfied - d.normal - d.dissatisfied - d.veryDissatisfied) / d.ratedCount * 100 : 0;
+                var nssContrib = totalRated > 0 && d.ratedCount > 0 ? ((nss - TARGET_NSS) * d.ratedCount / totalRated) : 0;
+                return { name: name, d: d, nss: nss, nssContrib: nssContrib };
+            });
+
+            var positive = all.slice().sort(function(a, b) { return b.nssContrib - a.nssContrib; }).slice(0, 3);
+            var negative = all.slice().sort(function(a, b) { return a.nssContrib - b.nssContrib; }).slice(0, 3);
+            var sorted = positive.concat(negative);
+
+            var html = '<table><thead><tr><th>排名</th><th>问题类型</th><th>工单量</th><th>占比(条形)</th><th>NSS</th><th>NSS偏差贡献</th></tr></thead><tbody>';
             sorted.forEach(function(item, index) {
-                var pct = (item[1] / total * 100).toFixed(1);
-                html += '<tr><td>' + (index + 1) + '</td><td><strong>' + item[0] + '</strong></td><td>' + item[1] + '</td><td>' + pct + '%</td><td><div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%;"></div></div></td></tr>';
+                var pct = (item.d.count / total * 100).toFixed(1);
+                var tag = index < 3 ? '<span style="color:#10b981;font-size:11px;">正向</span> ' : '<span style="color:#ef4444;font-size:11px;">负向</span> ';
+                html += '<tr><td>' + (index + 1) + '</td><td><strong>' + tag + item.name + '</strong></td><td>' + item.d.count + '</td>' +
+                    '<td><div class="progress-bar" style="display:inline-block;width:60%;vertical-align:middle;"><div class="progress-fill" style="width:' + pct + '%;"></div></div><span style="margin-left:8px;color:#6b7280;">' + pct + '%</span></td>' +
+                    '<td style="color: ' + (item.nss >= 0 ? '#10b981' : '#ef4444') + '; font-weight: 600;">' + (item.d.ratedCount > 0 ? item.nss.toFixed(1) + '%' : '-') + '</td>' +
+                    '<td style="color: ' + (item.nssContrib >= 0 ? '#10b981' : '#ef4444') + '; font-weight: 600;">' + (item.d.ratedCount > 0 ? item.nssContrib.toFixed(1) + '%' : '-') + '</td></tr>';
             });
             html += '</tbody></table>';
             document.getElementById('problemTypeTop5').innerHTML = html;
@@ -665,6 +707,40 @@
             }
             html += '</div>';
             document.getElementById('satisfactionDetail').innerHTML = html;
+        }
+
+        function generateRepeatCustomerTop5() {
+            var customers = {};
+            filteredData.forEach(function(r) {
+                var cid = r.customerId || r.conversationId;
+                if (!cid || String(cid).trim() === '') return;
+                cid = String(cid).trim();
+                if (!customers[cid]) customers[cid] = { id: cid, visits: 0, badReview: 0, ratedCount: 0, nssSum: 0 };
+                var c = customers[cid];
+                c.visits++;
+                if (r.satisfaction > 0 && r.satisfaction <= 3) c.badReview++;
+                if (r.satisfaction > 0) { c.ratedCount++; c.nssSum += r.satisfaction; }
+            });
+
+            var top = Object.keys(customers).map(function(id) {
+                var c = customers[id];
+                var nss = c.ratedCount > 0 ? (c.nssSum / c.ratedCount - 3) / 2 * 100 : 0;
+                return { c: c, nss: nss };
+            }).filter(function(item) { return item.c.visits > 1; }).sort(function(a, b) { return b.c.badReview - a.c.badReview || b.c.visits - a.c.visits; }).slice(0, 5);
+
+            if (top.length === 0) {
+                document.getElementById('repeatCustomerTop5').innerHTML = '<p style="color: #6b7280; text-align: center; padding: 20px;">暂无重复来访客户差评数据</p>';
+                return;
+            }
+
+            var html = '<table><thead><tr><th>排名</th><th>客户ID</th><th>来访次数</th><th>差评数量(1-3分)</th></tr></thead><tbody>';
+            top.forEach(function(item, i) {
+                var c = item.c;
+                html += '<tr><td>' + (i + 1) + '</td><td><strong>' + c.id + '</strong></td><td>' + c.visits + '</td>' +
+                    '<td style="color: #ef4444; font-weight: 600;">' + c.badReview + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            document.getElementById('repeatCustomerTop5').innerHTML = html;
         }
 
         function generateEmployeeRanking() {
