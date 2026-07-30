@@ -121,6 +121,7 @@
             <div class="quick-filters">
                 <button class="quick-btn" data-period="today">今日</button>
                 <button class="quick-btn" data-period="week">本周</button>
+                <button class="quick-btn" data-period="lastWeek">上周</button>
                 <button class="quick-btn" data-period="month">本月</button>
                 <button class="quick-btn" data-period="lastMonth">上月</button>
                 <button class="quick-btn active" data-period="all">全部</button>
@@ -145,7 +146,7 @@
                 </div>
 
                 <div class="card">
-                    <h3 class="card-title">二、问题类型TOP6分析（正向3+负向3）</h3>
+                    <h3 class="card-title">二、问题类型TOP10分析（正向5+负向5）</h3>
                     <div id="problemTypeTop5"></div>
                 </div>
 
@@ -230,6 +231,304 @@
         let rawData = [];
         let filteredData = [];
         let charts = {};
+        const DB_NAME = 'reportDB';
+        const STORE_NAME = 'reportStore';
+        const RECORD_KEY = 'lastImport';
+
+        function openDB() {
+            return new Promise(function(resolve, reject) {
+                if (!window.indexedDB) { reject(new Error('浏览器不支持本地存储')); return; }
+                const req = indexedDB.open(DB_NAME, 1);
+                req.onupgradeneeded = function() {
+                    if (!req.result.objectStoreNames.contains(STORE_NAME)) {
+                        req.result.createObjectStore(STORE_NAME);
+                    }
+                };
+                req.onsuccess = function() { resolve(req.result); };
+                req.onerror = function() { reject(req.error); };
+            });
+        }
+
+        function saveDataToDB(payload) {
+            return openDB().then(function(db) {
+                return new Promise(function(resolve, reject) {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    tx.objectStore(STORE_NAME).put(payload, RECORD_KEY);
+                    tx.oncomplete = function() { resolve(); };
+                    tx.onerror = function() { reject(tx.error); };
+                });
+            });
+        }
+
+        function loadDataFromDB() {
+            return openDB().then(function(db) {
+                return new Promise(function(resolve, reject) {
+                    const tx = db.transaction(STORE_NAME, 'readonly');
+                    const req = tx.objectStore(STORE_NAME).get(RECORD_KEY);
+                    req.onsuccess = function() { resolve(req.result || null); };
+                    req.onerror = function() { reject(req.error); };
+                });
+            });
+        }
+
+        function clearDataFromDB() {
+            return openDB().then(function(db) {
+                return new Promise(function(resolve, reject) {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    tx.objectStore(STORE_NAME).delete(RECORD_KEY);
+                    tx.oncomplete = function() { resolve(); };
+                    tx.onerror = function() { reject(tx.error); };
+                });
+            });
+        }
+
+        var badReviewCache = {};
+        var problemTypeBadReviewCache = {};
+        var customerBadReviewCache = {};
+        var employeeBadReviewCache = {};
+        var weaknessBadReviewCache = {};
+        var employeeSkillBadReviewCache = {};
+
+        function renderBadReviewTableHtml(rows) {
+            rows.sort(function(a, b) {
+                return String(a.problemType || '其他').localeCompare(String(b.problemType || '其他'), 'zh-Hans-CN');
+            });
+            var html = '<div style="border: 1px solid #fecaca; border-radius: 6px; overflow: hidden;"><table style="width: 100%; border-collapse: collapse; font-size: 13px;"><thead><tr style="background: #fef2f2; color: #991b1b;">' +
+                '<th style="padding: 8px; text-align: left; border-bottom: 1px solid #fecaca;">技能组</th>' +
+                '<th style="padding: 8px; text-align: left; border-bottom: 1px solid #fecaca;">业务类别</th>' +
+                '<th style="padding: 8px; text-align: left; border-bottom: 1px solid #fecaca;">满意度</th>' +
+                '<th style="padding: 8px; text-align: left; border-bottom: 1px solid #fecaca;">咨询会话id</th>' +
+                '<th style="padding: 8px; text-align: left; border-bottom: 1px solid #fecaca;">工号</th>' +
+                '<th style="padding: 8px; text-align: left; border-bottom: 1px solid #fecaca;">会话详情链接</th>' +
+                '</tr></thead><tbody>';
+            rows.forEach(function(r) {
+                var link = r['会话详情链接'] || '';
+                var linkHtml = link ? '<a href="' + String(link).replace(/"/g, '') + '" target="_blank" style="color: #667eea;">查看</a>' : '-';
+                html += '<tr style="border-bottom: 1px solid #fee2e2;">' +
+                    '<td style="padding: 8px;">' + (r.skillGroup || '-') + '</td>' +
+                    '<td style="padding: 8px;">' + (r.problemType || '-') + '</td>' +
+                    '<td style="padding: 8px;">' + r.satisfaction + '分</td>' +
+                    '<td style="padding: 8px;">' + (r.conversationId || '-') + '</td>' +
+                    '<td style="padding: 8px;">' + (r.staffId || '-') + '</td>' +
+                    '<td style="padding: 8px;">' + linkHtml + '</td>' +
+                    '</tr>';
+            });
+            html += '</tbody></table></div>';
+            return html;
+        }
+
+        function renderBadReviewStaffList(groupName, container) {
+            var badRows = badReviewCache[groupName] || [];
+            var staffMap = {};
+            badRows.forEach(function(r) {
+                var sid = r.staffId || '未知工号';
+                if (!staffMap[sid]) staffMap[sid] = { staffId: sid, staffName: r.staffName || sid, count: 0, rows: [] };
+                staffMap[sid].count++;
+                staffMap[sid].rows.push(r);
+            });
+            var staffList = Object.keys(staffMap).sort(function(a, b) {
+                return String(a).localeCompare(String(b), 'zh-Hans-CN', { numeric: true });
+            });
+            var html = '<div style="font-size: 13px; color: #6b7280; margin-bottom: 8px;">该技能组差评工单按工号分布（共 ' + badRows.length + ' 条），点击工号查看明细：</div>';
+            html += '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;">';
+            staffList.forEach(function(sid) {
+                var safeId = sid.replace(/[^一-龥A-Za-z0-9]/g, '_');
+                html += '<span onclick="renderBadReviewStaffDetail(\'' + groupName.replace(/'/g, "\\'") + '\', \'' + safeId + '\')" style="cursor: pointer; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 4px 10px; border-radius: 14px; font-size: 13px;">' +
+                    (staffMap[sid].staffName || sid) + ' (' + staffMap[sid].count + ')</span>';
+            });
+            html += '</div>';
+            html += '<div id="badReviewStaffDetail_' + groupName.replace(/[^一-龥A-Za-z0-9]/g, '_') + '"></div>';
+            container.innerHTML = html;
+        }
+
+        function renderBadReviewStaffDetail(groupName, safeId) {
+            var container = document.getElementById('badReviewStaffDetail_' + groupName.replace(/[^一-龥A-Za-z0-9]/g, '_'));
+            if (!container) return;
+            var badRows = badReviewCache[groupName] || [];
+            var rows = badRows.filter(function(r) { return (r.staffId || '未知工号').replace(/[^一-龥A-Za-z0-9]/g, '_') === safeId; });
+            if (rows.length === 0) { container.innerHTML = ''; return; }
+            container.innerHTML = renderBadReviewTableHtml(rows);
+        }
+
+        function toggleProblemTypeBadReview(safeName) {
+            var container = document.getElementById('problemTypeBadReviewDetail');
+            if (!container) return;
+            if (container.dataset.open === safeName) {
+                container.innerHTML = '';
+                container.dataset.open = '';
+                return;
+            }
+            var data = problemTypeBadReviewCache[safeName];
+            if (!data) { container.innerHTML = ''; return; }
+            var rows = data.rows.slice();
+            if (rows.length === 0) {
+                container.innerHTML = '<p style="color: #6b7280; font-size: 13px; padding: 10px;">该问题类型暂无差评工单明细</p>';
+                container.dataset.open = safeName;
+                return;
+            }
+            var groupOrder = [];
+            var groupMap = {};
+            rows.forEach(function(r) {
+                var g = r.skillGroup || '未分类';
+                if (!groupMap[g]) { groupMap[g] = []; groupOrder.push(g); }
+                groupMap[g].push(r);
+            });
+            var html = '<div style="font-size: 13px; color: #6b7280; margin: 10px 0 8px;">问题类型「' + data.name + '」差评工单分布（按技能组排列，共 ' + rows.length + ' 条）：</div>';
+            groupOrder.forEach(function(g) {
+                var gRows = groupMap[g];
+                var gSafe = g.replace(/[^一-龥A-Za-z0-9]/g, '_');
+                var staffMap = {};
+                gRows.forEach(function(r) {
+                    var sid = r.staffId || '未知工号';
+                    if (!staffMap[sid]) staffMap[sid] = { staffId: sid, staffName: r.staffName || sid, count: 0, rows: [] };
+                    staffMap[sid].count++;
+                    staffMap[sid].rows.push(r);
+                });
+                var staffList = Object.keys(staffMap).sort(function(a, b) {
+                    return String(a).localeCompare(String(b), 'zh-Hans-CN', { numeric: true });
+                });
+                html += '<div style="margin: 8px 0; padding: 8px; border: 1px solid #fecaca; border-radius: 6px; background: #fffafa;">';
+                html += '<div style="font-size: 13px; font-weight: 600; color: #991b1b; margin-bottom: 6px;">技能组：' + g + '（' + gRows.length + ' 条）</div>';
+                html += '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+                staffList.forEach(function(sid) {
+                    var safeId = sid.replace(/[^一-龥A-Za-z0-9]/g, '_');
+                    html += '<span onclick="renderProblemTypeStaffDetail(\'' + safeName + '\', \'' + gSafe + '\', \'' + safeId + '\')" style="cursor: pointer; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 4px 10px; border-radius: 14px; font-size: 13px;">' +
+                        (staffMap[sid].staffName || sid) + ' (' + staffMap[sid].count + ')</span>';
+                });
+                html += '</div>';
+                html += '<div id="problemTypeStaffDetail_' + safeName + '_' + gSafe + '"></div>';
+                html += '</div>';
+            });
+            container.innerHTML = html;
+            container.dataset.open = safeName;
+        }
+
+        function renderProblemTypeStaffDetail(safeName, gSafe, safeId) {
+            var container = document.getElementById('problemTypeStaffDetail_' + safeName + '_' + gSafe);
+            if (!container) return;
+            if (container.dataset.open === safeId) { container.innerHTML = ''; container.dataset.open = ''; return; }
+            var data = problemTypeBadReviewCache[safeName];
+            if (!data) { container.innerHTML = ''; return; }
+            var rows = data.rows.filter(function(r) {
+                return (r.skillGroup || '未分类').replace(/[^一-龥A-Za-z0-9]/g, '_') === gSafe && (r.staffId || '未知工号').replace(/[^一-龥A-Za-z0-9]/g, '_') === safeId;
+            });
+            if (rows.length === 0) { container.innerHTML = ''; return; }
+            container.innerHTML = renderBadReviewTableHtml(rows);
+            container.dataset.open = safeId;
+        }
+
+        function toggleCustomerBadReview(safeId) {
+            var container = document.getElementById('customerBadReviewDetail');
+            if (!container) return;
+            if (container.dataset.open === safeId) { container.innerHTML = ''; container.dataset.open = ''; return; }
+            var data = customerBadReviewCache[safeId];
+            if (!data) { container.innerHTML = ''; return; }
+            var rows = data.rows.slice();
+            if (rows.length === 0) {
+                container.innerHTML = '<p style="color: #6b7280; font-size: 13px; padding: 10px;">该客户暂无差评工单明细</p>';
+                container.dataset.open = safeId;
+                return;
+            }
+            container.innerHTML = '<div style="font-size: 13px; color: #6b7280; margin: 10px 0 8px;">客户 ' + data.id + ' 差评工单明细（共 ' + rows.length + ' 条）：</div>' + renderBadReviewTableHtml(rows);
+            container.dataset.open = safeId;
+        }
+
+        function toggleEmployeeBadReview(safeName) {
+            var container = document.getElementById('employeeBadReviewDetail');
+            if (!container) return;
+            if (container.dataset.open === safeName) { container.innerHTML = ''; container.dataset.open = ''; return; }
+            var data = employeeBadReviewCache[safeName];
+            if (!data) { container.innerHTML = ''; return; }
+            var rows = data.rows.slice();
+            if (rows.length === 0) {
+                container.innerHTML = '<p style="color: #6b7280; font-size: 13px; padding: 10px;">该坐席暂无差评工单明细</p>';
+                container.dataset.open = safeName;
+                return;
+            }
+            container.innerHTML = '<div style="font-size: 13px; color: #6b7280; margin: 10px 0 8px;">坐席 ' + data.name + ' 差评工单明细（共 ' + rows.length + ' 条）：</div>' + renderBadReviewTableHtml(rows);
+            container.dataset.open = safeName;
+        }
+
+        function toggleWeaknessBadReview(safeName) {
+            var container = document.getElementById('weaknessBadReview_' + safeName);
+            if (!container) return;
+            if (container.dataset.open === safeName) { container.innerHTML = ''; container.dataset.open = ''; return; }
+            var data = weaknessBadReviewCache[safeName];
+            if (!data) { container.innerHTML = ''; return; }
+            var rows = data.rows.slice();
+            if (rows.length === 0) {
+                container.innerHTML = '<p style="color: #6b7280; font-size: 13px; padding: 10px;">该短板类别暂无差评工单明细</p>';
+                container.dataset.open = safeName;
+                return;
+            }
+            container.innerHTML = '<div style="font-size: 13px; color: #6b7280; margin: 10px 0 8px;">短板「' + data.type + '」差评工单明细（按业务类别排列，共 ' + rows.length + ' 条）：</div>' + renderBadReviewTableHtml(rows);
+            container.dataset.open = safeName;
+        }
+
+        function toggleSkillBadReview(safeName) {
+            var container = document.getElementById('skillBadReview_' + safeName);
+            if (!container) return;
+            if (container.dataset.open === safeName) {
+                container.innerHTML = '';
+                container.dataset.open = '';
+                return;
+            }
+            var rows = badReviewCache[safeName] || [];
+            if (rows.length === 0) {
+                container.innerHTML = '<p style="color: #6b7280; font-size: 13px; padding: 10px;">该技能组暂无差评工单明细</p>';
+                container.dataset.open = safeName;
+                return;
+            }
+            var staffMap = {};
+            rows.forEach(function(r) {
+                var sid = r.staffId || '未知工号';
+                if (!staffMap[sid]) staffMap[sid] = { staffId: sid, staffName: r.staffName || sid, count: 0, rows: [] };
+                staffMap[sid].count++;
+                staffMap[sid].rows.push(r);
+            });
+            var staffList = Object.keys(staffMap).sort(function(a, b) {
+                return String(a).localeCompare(String(b), 'zh-Hans-CN', { numeric: true });
+            });
+            var html = '<div style="font-size: 13px; color: #6b7280; margin: 10px 0 8px;">该技能组差评工单按工号分布（共 ' + rows.length + ' 条），点击工号查看明细：</div>';
+            html += '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;">';
+            staffList.forEach(function(sid) {
+                var sSafe = sid.replace(/[^一-龥A-Za-z0-9]/g, '_');
+                html += '<span onclick="renderSkillBadReviewStaffDetail(\'' + safeName + '\', \'' + sSafe + '\')" style="cursor: pointer; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 4px 10px; border-radius: 14px; font-size: 13px;">' +
+                    (staffMap[sid].staffName || sid) + ' (' + staffMap[sid].count + ')</span>';
+            });
+            html += '</div>';
+            html += '<div id="skillBadReviewStaffDetail_' + safeName + '"></div>';
+            container.innerHTML = html;
+            container.dataset.open = safeName;
+        }
+
+        function renderSkillBadReviewStaffDetail(safeName, sSafe) {
+            var container = document.getElementById('skillBadReviewStaffDetail_' + safeName);
+            if (!container) return;
+            if (container.dataset.open === sSafe) { container.innerHTML = ''; container.dataset.open = ''; return; }
+            var rows = (badReviewCache[safeName] || []).filter(function(r) {
+                return (r.staffId || '未知工号').replace(/[^一-龥A-Za-z0-9]/g, '_') === sSafe;
+            });
+            if (rows.length === 0) { container.innerHTML = ''; return; }
+            container.innerHTML = renderBadReviewTableHtml(rows);
+            container.dataset.open = sSafe;
+        }
+
+        function toggleEmployeeSkillBadReview(safeName) {
+            var container = document.getElementById('employeeSkillBadReviewDetail');
+            if (!container) return;
+            if (container.dataset.open === safeName) { container.innerHTML = ''; container.dataset.open = ''; return; }
+            var data = employeeSkillBadReviewCache[safeName];
+            if (!data) { container.innerHTML = ''; return; }
+            var rows = data.rows.slice();
+            if (rows.length === 0) {
+                container.innerHTML = '<p style="color: #6b7280; font-size: 13px; padding: 10px;">该技能组暂无差评工单明细</p>';
+                container.dataset.open = safeName;
+                return;
+            }
+            container.innerHTML = '<div style="font-size: 13px; color: #6b7280; margin: 10px 0 8px;">技能组「' + data.name + '」差评工单分布（按业务类别排列，共 ' + rows.length + ' 条）：</div>' + renderBadReviewTableHtml(rows);
+            container.dataset.open = safeName;
+        }
 
         document.getElementById('fileInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
@@ -257,6 +556,7 @@
             rawData = [];
             filteredData = [];
             workbook = null;
+            clearDataFromDB().catch(function() {});
             document.getElementById('uploadArea').style.display = 'block';
             document.getElementById('dataInfo').style.display = 'none';
             document.getElementById('filterBar').style.display = 'none';
@@ -299,7 +599,12 @@
                     }
                     rawData = sheetData.map(function(row) { return normalizeRow(row); }).filter(function(row) { return Object.keys(row).length > 3; });
                     filteredData = rawData.slice();
-                    
+
+                    saveDataToDB({
+                        rawData: rawData,
+                        savedAt: new Date().toLocaleString('zh-CN')
+                    }).catch(function(err) { console.warn('本地存储失败:', err); });
+
                     initDateRange();
                     document.getElementById('uploadArea').style.display = 'none';
                     document.getElementById('dataInfo').style.display = 'flex';
@@ -490,6 +795,7 @@
                         ratedCount: 0,
                         consultOrders: 0,
                         badReviewOrders: 0,
+                        badReviewRows: [],
                         reasons: { positive: {}, negative: {} }
                     };
                 }
@@ -501,7 +807,10 @@
                     groups[g].ratedCount++;
                 }
                 if (r.consultOrder && String(r.consultOrder).trim() !== '') groups[g].consultOrders++;
-                if (r.satisfaction > 0 && r.satisfaction <= 3) groups[g].badReviewOrders++;
+                if (r.satisfaction > 0 && r.satisfaction <= 3) {
+                    groups[g].badReviewOrders++;
+                    groups[g].badReviewRows.push(r);
+                }
 
                 var reasonStr = r.satisfactionReason || '';
                 if (r.satisfaction >= 4 && reasonStr) {
@@ -518,11 +827,16 @@
                 }
             });
 
+            badReviewCache = {};
+            Object.keys(groups).forEach(function(name) {
+                badReviewCache[name.replace(/[^一-龥A-Za-z0-9]/g, '_')] = groups[name].badReviewRows;
+            });
+
             var totalRated = filteredData.filter(function(r) { return r.satisfaction > 0; }).length;
             var TARGET_NSS = 83;
-            
+
             var html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px;">';
-            
+
             Object.keys(groups).forEach(function(name) {
                 var data = groups[name];
                 var nss = data.ratedCount > 0 ? (data.satisfaction / data.ratedCount) : 0;
@@ -536,16 +850,18 @@
 
                 var posTop = Object.entries(data.reasons.positive).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 5);
                 var negTop = Object.entries(data.reasons.negative).sort(function(a, b) { return b[1] - a[1]; }).slice(0, 5);
-                
+
+                var safeName = name.replace(/[^一-龥A-Za-z0-9]/g, '_');
                 html += '<div class="card" style="padding: 15px;"><h4 style="color: #667eea; margin-bottom: 10px;">' + name + '</h4>';
                 html += '<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 15px;">';
                 html += '<div><span style="color: #6b7280; font-size: 12px;">工单量</span><br><strong>' + data.count + '</strong></div>';
                 html += '<div><span style="color: #6b7280; font-size: 12px;">NSS</span><br><strong style="color: ' + (groupNSS >= 0 ? '#10b981' : '#ef4444') + '">' + (data.ratedCount > 0 ? groupNSS.toFixed(1) + '%' : '-') + '</strong></div>';
                 html += '<div><span style="color: #6b7280; font-size: 12px;">已评价</span><br><strong>' + data.ratedCount + '</strong></div>';
-                html += '<div><span style="color: #6b7280; font-size: 12px;">差评工单数量</span><br><strong style="color: ' + (data.badReviewOrders > 0 ? '#ef4444' : '#10b981') + '">' + data.badReviewOrders + '</strong></div>';
+                html += '<div><span style="color: #6b7280; font-size: 12px;">差评工单数量</span><br>' +
+                    (data.badReviewOrders > 0 ? '<strong style="color: #ef4444; cursor: pointer; text-decoration: underline;" onclick="toggleSkillBadReview(\'' + safeName + '\')" title="点击查看/隐藏差评分布">' + data.badReviewOrders + '</strong>' : '<strong style="color: #10b981;">0</strong>') + '</div>';
                 html += '<div><span style="color: #6b7280; font-size: 12px;">NSS偏差贡献</span><br><strong style="color: ' + (nssContrib >= 0 ? '#10b981' : '#ef4444') + '">' + (data.ratedCount > 0 ? nssContrib.toFixed(1) + '%' : '-') + '</strong></div>';
                 html += '</div>';
-                
+
                 html += '<div style="margin-bottom: 10px;"><span style="color: #6b7280; font-size: 12px;">满意度分布:</span>';
                 html += '<div style="display: flex; gap: 5px; margin-top: 5px;">';
                 html += '<div style="flex: 1; text-align: center; background: #10b981; color: white; padding: 3px; font-size: 11px; border-radius: 3px;" title="非常满意(5分)">' + verySatisfied + '</div>';
@@ -567,10 +883,11 @@
                     }
                     html += '</div>';
                 }
-                
+
+                html += '<div id="skillBadReview_' + safeName + '"></div>';
                 html += '</div>';
             });
-            
+
             html += '</div>';
             document.getElementById('skillGroupOverview').innerHTML = html;
         }
@@ -608,7 +925,7 @@
                 var subs = String(raw).split(/[;；,，]/).map(function(s) { return s.trim(); }).filter(function(s) { return s; });
                 if (subs.length === 0) subs = ['其他'];
                 subs.forEach(function(t) {
-                    if (!types[t]) types[t] = { count: 0, ratedCount: 0, verySatisfied: 0, satisfied: 0, normal: 0, dissatisfied: 0, veryDissatisfied: 0 };
+                    if (!types[t]) types[t] = { count: 0, ratedCount: 0, verySatisfied: 0, satisfied: 0, normal: 0, dissatisfied: 0, veryDissatisfied: 0, badReview: 0 };
                     var d = types[t];
                     d.count++;
                     if (r.satisfaction > 0) {
@@ -619,6 +936,7 @@
                         else if (r.satisfaction === 2) d.dissatisfied++;
                         else if (r.satisfaction === 1) d.veryDissatisfied++;
                     }
+                    if (r.satisfaction > 0 && r.satisfaction <= 3) d.badReview++;
                 });
             });
 
@@ -633,20 +951,35 @@
                 return { name: name, d: d, nss: nss, nssContrib: nssContrib };
             });
 
-            var positive = all.slice().sort(function(a, b) { return b.nssContrib - a.nssContrib; }).slice(0, 3);
-            var negative = all.slice().sort(function(a, b) { return a.nssContrib - b.nssContrib; }).slice(0, 3);
+            var positive = all.slice().sort(function(a, b) { return b.nssContrib - a.nssContrib; }).slice(0, 5);
+            var negative = all.slice().sort(function(a, b) { return a.nssContrib - b.nssContrib; }).slice(0, 5);
             var sorted = positive.concat(negative);
 
-            var html = '<table><thead><tr><th>排名</th><th>问题类型</th><th>工单量</th><th>占比(条形)</th><th>NSS</th><th>NSS偏差贡献</th></tr></thead><tbody>';
+            problemTypeBadReviewCache = {};
+            sorted.forEach(function(item) {
+                var safeName = item.name.replace(/[^一-龥A-Za-z0-9]/g, '_');
+                var rows = [];
+                filteredData.forEach(function(r) {
+                    var raw = r.problemType || '其他';
+                    var subs = String(raw).split(/[;；,，]/).map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+                    if (subs.indexOf(item.name) >= 0 && r.satisfaction > 0 && r.satisfaction <= 3) rows.push(r);
+                });
+                problemTypeBadReviewCache[safeName] = { name: item.name, rows: rows };
+            });
+
+            var html = '<table><thead><tr><th>排名</th><th>问题类型</th><th>工单量</th><th>占比(条形)</th><th>NSS</th><th>NSS偏差贡献</th><th>差评工单总数量</th></tr></thead><tbody>';
             sorted.forEach(function(item, index) {
                 var pct = (item.d.count / total * 100).toFixed(1);
-                var tag = index < 3 ? '<span style="color:#10b981;font-size:11px;">正向</span> ' : '<span style="color:#ef4444;font-size:11px;">负向</span> ';
+                var tag = index < 5 ? '<span style="color:#10b981;font-size:11px;">正向</span> ' : '<span style="color:#ef4444;font-size:11px;">负向</span> ';
+                var safeName = item.name.replace(/[^一-龥A-Za-z0-9]/g, '_');
                 html += '<tr><td>' + (index + 1) + '</td><td><strong>' + tag + item.name + '</strong></td><td>' + item.d.count + '</td>' +
                     '<td><div class="progress-bar" style="display:inline-block;width:60%;vertical-align:middle;"><div class="progress-fill" style="width:' + pct + '%;"></div></div><span style="margin-left:8px;color:#6b7280;">' + pct + '%</span></td>' +
                     '<td style="color: ' + (item.nss >= 0 ? '#10b981' : '#ef4444') + '; font-weight: 600;">' + (item.d.ratedCount > 0 ? item.nss.toFixed(1) + '%' : '-') + '</td>' +
-                    '<td style="color: ' + (item.nssContrib >= 0 ? '#10b981' : '#ef4444') + '; font-weight: 600;">' + (item.d.ratedCount > 0 ? item.nssContrib.toFixed(1) + '%' : '-') + '</td></tr>';
+                    '<td style="color: ' + (item.nssContrib >= 0 ? '#10b981' : '#ef4444') + '; font-weight: 600;">' + (item.d.ratedCount > 0 ? item.nssContrib.toFixed(1) + '%' : '-') + '</td>' +
+                    '<td style="color: #ef4444; font-weight: 600; cursor: pointer; text-decoration: underline;" onclick="toggleProblemTypeBadReview(\'' + safeName + '\')" title="点击查看该问题类型差评分布">' + item.d.badReview + '</td></tr>';
             });
             html += '</tbody></table>';
+            html += '<div id="problemTypeBadReviewDetail"></div>';
             document.getElementById('problemTypeTop5').innerHTML = html;
         }
 
@@ -715,10 +1048,10 @@
                 var cid = r.customerId || r.conversationId;
                 if (!cid || String(cid).trim() === '') return;
                 cid = String(cid).trim();
-                if (!customers[cid]) customers[cid] = { id: cid, visits: 0, badReview: 0, ratedCount: 0, nssSum: 0 };
+                if (!customers[cid]) customers[cid] = { id: cid, visits: 0, badReview: 0, ratedCount: 0, nssSum: 0, badReviewRows: [] };
                 var c = customers[cid];
                 c.visits++;
-                if (r.satisfaction > 0 && r.satisfaction <= 3) c.badReview++;
+                if (r.satisfaction > 0 && r.satisfaction <= 3) { c.badReview++; c.badReviewRows.push(r); }
                 if (r.satisfaction > 0) { c.ratedCount++; c.nssSum += r.satisfaction; }
             });
 
@@ -728,6 +1061,11 @@
                 return { c: c, nss: nss };
             }).filter(function(item) { return item.c.visits > 1; }).sort(function(a, b) { return b.c.badReview - a.c.badReview || b.c.visits - a.c.visits; }).slice(0, 5);
 
+            customerBadReviewCache = {};
+            top.forEach(function(item) {
+                customerBadReviewCache[item.c.id.replace(/[^一-龥A-Za-z0-9]/g, '_')] = { id: item.c.id, rows: item.c.badReviewRows };
+            });
+
             if (top.length === 0) {
                 document.getElementById('repeatCustomerTop5').innerHTML = '<p style="color: #6b7280; text-align: center; padding: 20px;">暂无重复来访客户差评数据</p>';
                 return;
@@ -736,10 +1074,12 @@
             var html = '<table><thead><tr><th>排名</th><th>客户ID</th><th>来访次数</th><th>差评数量(1-3分)</th></tr></thead><tbody>';
             top.forEach(function(item, i) {
                 var c = item.c;
+                var safeId = c.id.replace(/[^一-龥A-Za-z0-9]/g, '_');
                 html += '<tr><td>' + (i + 1) + '</td><td><strong>' + c.id + '</strong></td><td>' + c.visits + '</td>' +
-                    '<td style="color: #ef4444; font-weight: 600;">' + c.badReview + '</td></tr>';
+                    '<td style="color: #ef4444; font-weight: 600; cursor: pointer; text-decoration: underline;" onclick="toggleCustomerBadReview(\'' + safeId + '\')" title="点击查看差评明细">' + c.badReview + '</td></tr>';
             });
             html += '</tbody></table>';
+            html += '<div id="customerBadReviewDetail"></div>';
             document.getElementById('repeatCustomerTop5').innerHTML = html;
         }
 
@@ -751,7 +1091,7 @@
                 employees[name].count++;
                 if (r.responseTime > 0) employees[name].responseTime += r.responseTime;
             });
-            
+
             var scored = Object.keys(employees).map(function(name) {
                 var data = employees[name];
                 var empData = filteredData.filter(function(r) { return (r.staffName || r.staffId) === name; });
@@ -760,6 +1100,7 @@
                 var empWait = empData.filter(function(r) { return r.waitTime > 0; });
                 var avgWait = empWait.length > 0 ? empWait.reduce(function(s, r) { return s + r.waitTime; }, 0) / empWait.length : 0;
                 var badReviewOrders = empData.filter(function(r) { return r.satisfaction > 0 && r.satisfaction <= 3; }).length;
+                var badReviewRows = empData.filter(function(r) { return r.satisfaction > 0 && r.satisfaction <= 3; });
                 return {
                     name: name,
                     count: data.count,
@@ -767,22 +1108,29 @@
                     avgWait: avgWait,
                     nss: empNSS.nss,
                     resolution: empRes.rate,
-                    badReviewOrders: badReviewOrders
+                    badReviewOrders: badReviewOrders,
+                    badReviewRows: badReviewRows
                 };
             }).sort(function(a, b) { return b.nss - a.nss; });
-            
+
+            employeeBadReviewCache = {};
+            scored.forEach(function(e) {
+                employeeBadReviewCache[e.name.replace(/[^一-龥A-Za-z0-9]/g, '_')] = { name: e.name, rows: e.badReviewRows };
+            });
+
             var top3 = scored.slice(0, 3);
             var bottom3 = scored.slice(-3).reverse();
-            
+
             var html = '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">';
-            
+
             html += '<div><h4 style="color: #10b981; margin-bottom: 15px;">🌟 表现突出TOP3</h4>';
             if (top3.length > 0) {
                 top3.forEach(function(e, i) {
+                    var safeName = e.name.replace(/[^一-龥A-Za-z0-9]/g, '_');
                     html += '<div class="improvement-card" style="border-left-color: #10b981;">';
                     html += '<h4>第' + (i+1) + '名: ' + e.name + '</h4>';
                     html += '<p><strong>工单量:</strong> ' + e.count + ' | <strong>NSS:</strong> ' + e.nss.toFixed(1) + '% | <strong>解决率:</strong> ' + e.resolution.toFixed(1) + '%</p>';
-                    html += '<p><strong>平均响应:</strong> ' + formatTime(e.avgResponse) + ' | <strong>平均等待:</strong> ' + formatTime(e.avgWait) + ' | <strong>差评工单数量:</strong> ' + e.badReviewOrders + '</p>';
+                    html += '<p><strong>平均响应:</strong> ' + formatTime(e.avgResponse) + ' | <strong>平均等待:</strong> ' + formatTime(e.avgWait) + ' | <strong>差评工单数量:</strong> <span style="color:#ef4444;cursor:pointer;text-decoration:underline;" onclick="toggleEmployeeBadReview(\'' + safeName + '\')" title="点击查看差评明细">' + e.badReviewOrders + '</span></p>';
                     html += '<p style="color: #10b981; font-size: 12px;">✅ 贡献突出: NSS高于团队平均，解决率高，表现稳定</p>';
                     html += '</div>';
                 });
@@ -790,14 +1138,15 @@
                 html += '<p style="color: #6b7280;">暂无数据</p>';
             }
             html += '</div>';
-            
+
             html += '<div><h4 style="color: #ef4444; margin-bottom: 15px;">⚠️ 待改进TOP3</h4>';
             if (bottom3.length > 0) {
                 bottom3.forEach(function(e, i) {
+                    var safeName = e.name.replace(/[^一-龥A-Za-z0-9]/g, '_');
                     html += '<div class="improvement-card" style="border-left-color: #ef4444;">';
                     html += '<h4>第' + (i+1) + '名: ' + e.name + '</h4>';
                     html += '<p><strong>工单量:</strong> ' + e.count + ' | <strong>NSS:</strong> ' + e.nss.toFixed(1) + '% | <strong>解决率:</strong> ' + e.resolution.toFixed(1) + '%</p>';
-                    html += '<p><strong>平均响应:</strong> ' + formatTime(e.avgResponse) + ' | <strong>平均等待:</strong> ' + formatTime(e.avgWait) + ' | <strong>差评工单数量:</strong> ' + e.badReviewOrders + '</p>';
+                    html += '<p><strong>平均响应:</strong> ' + formatTime(e.avgResponse) + ' | <strong>平均等待:</strong> ' + formatTime(e.avgWait) + ' | <strong>差评工单数量:</strong> <span style="color:#ef4444;cursor:pointer;text-decoration:underline;" onclick="toggleEmployeeBadReview(\'' + safeName + '\')" title="点击查看差评明细">' + e.badReviewOrders + '</span></p>';
                     html += '<p style="color: #ef4444; font-size: 12px;">❌ 问题分析: NSS偏低' + (e.badReviewOrders > 0 ? '，存在差评工单' : '') + '，需重点关注</p>';
                     html += '</div>';
                 });
@@ -805,8 +1154,9 @@
                 html += '<p style="color: #6b7280;">暂无数据</p>';
             }
             html += '</div>';
-            
+
             html += '</div>';
+            html += '<div id="employeeBadReviewDetail"></div>';
             document.getElementById('employeeRanking').innerHTML = html;
         }
 
@@ -828,24 +1178,27 @@
         function generateWeaknessAnalysis() {
             var employeeId = document.getElementById('weaknessEmployeeSelect').value;
             var container = document.getElementById('weaknessAnalysis');
-            
+
             if (!employeeId) {
                 container.innerHTML = '<p style="color: #6b7280; text-align: center;">请选择一名坐席进行能力短板分析</p>';
                 return;
             }
-            
+
             var employeeData = filteredData.filter(function(r) { return (r.staffName || r.staffId) === employeeId; });
             var total = employeeData.length;
-            
+
             var problems = {};
             employeeData.forEach(function(r) {
                 var p = r.problemType || '其他';
-                if (!problems[p]) problems[p] = { count: 0, lowScore: 0, reasons: [] };
+                if (!problems[p]) problems[p] = { count: 0, lowScore: 0, reasons: [], badReviewRows: [] };
                 problems[p].count++;
-                if (r.satisfaction > 0 && r.satisfaction <= 3) problems[p].lowScore++;
+                if (r.satisfaction > 0 && r.satisfaction <= 3) {
+                    problems[p].lowScore++;
+                    problems[p].badReviewRows.push(r);
+                }
                 if (r.satisfactionReason) problems[p].reasons.push({ score: r.satisfaction, reason: r.satisfactionReason });
             });
-            
+
             var teamTotal = filteredData.length;
             var weakPoints = Object.entries(problems)
                 .map(function(p) {
@@ -859,27 +1212,34 @@
                         rate: empRate,
                         teamRate: teamRate,
                         diff: empRate - teamRate,
-                        reasons: p[1].reasons.filter(function(r) { return r.score <= 2; })
+                        reasons: p[1].reasons.filter(function(r) { return r.score <= 2; }),
+                        badReviewRows: p[1].badReviewRows
                     };
                 })
-                .filter(function(p) { return p.diff > 0 || p.lowScore > 0; })
-                .sort(function(a, b) { return b.diff - a.diff; })
+                .filter(function(p) { return p.lowScore > 0; })
+                .sort(function(a, b) { return b.lowScore - a.lowScore; })
                 .slice(0, 3);
-            
+
+            weaknessBadReviewCache = {};
+            weakPoints.forEach(function(wp) {
+                weaknessBadReviewCache[wp.type.replace(/[^一-龥A-Za-z0-9]/g, '_')] = { type: wp.type, rows: wp.badReviewRows };
+            });
+
             var html = '<div class="card" style="background: #fef3c7; border-left: 4px solid #f59e0b;">';
             html += '<h4 style="color: #92400e;">坐席 ' + employeeId + ' 能力短板分析</h4>';
             html += '<p style="color: #6b7280; font-size: 14px;">总工单量: ' + total + ' 条 | 统计周期: ' + document.getElementById('startDate').value + ' 至 ' + document.getElementById('endDate').value + '</p>';
             html += '</div>';
-            
+
             if (weakPoints.length === 0) {
                 html += '<div class="alert alert-success">该坐席暂无明显能力短板，各项指标表现正常</div>';
             } else {
                 weakPoints.forEach(function(wp, index) {
+                    var safeName = wp.type.replace(/[^一-龥A-Za-z0-9]/g, '_');
                     html += '<div class="improvement-card">';
                     html += '<h4>短板' + (index + 1) + ': ' + wp.type + '</h4>';
                     html += '<p><strong>工单量:</strong> ' + wp.count + '条 (占个人总量' + (wp.rate * 100).toFixed(1) + '%，团队占比' + (wp.teamRate * 100).toFixed(1) + '%)</p>';
-                    html += '<p><strong>差评工单:</strong> ' + wp.lowScore + '条</p>';
-                    
+                    html += '<p><strong>差评工单:</strong> <span style="color:#ef4444;cursor:pointer;text-decoration:underline;" onclick="toggleWeaknessBadReview(\'' + safeName + '\')" title="点击查看差评明细">' + wp.lowScore + '</span>条</p>';
+
                     html += '<div style="background: #fee2e2; padding: 10px; border-radius: 6px; margin: 10px 0;">';
                     html += '<strong style="color: #991b1b;">常见错误类型/知识盲区:</strong>';
                     if (wp.reasons.length > 0) {
@@ -900,7 +1260,7 @@
                         html += '<p style="color: #6b7280; margin: 10px 0 0 0;">暂无详细原因记录</p>';
                     }
                     html += '</div>';
-                    
+
                     html += '<div style="background: #d1fae5; padding: 10px; border-radius: 6px;">';
                     html += '<strong style="color: #065f46;">推荐改进动作:</strong>';
                     html += '<ul style="margin: 10px 0 0 20px; color: #065f46;">';
@@ -910,10 +1270,12 @@
                     html += '<li>定期复盘该类工单，总结常见问题点</li>';
                     html += '</ul>';
                     html += '</div>';
+                    html += '<div id="weaknessBadReview_' + safeName + '"></div>';
                     html += '</div>';
                 });
             }
-            
+
+            html += '<div id="weaknessBadReviewDetail"></div>';
             container.innerHTML = html;
         }
 
@@ -1223,13 +1585,15 @@
             });
         }
 
+        var employeeSkillBadReviewCache = {};
+
         function generateEmployeeSkillOverview(employeeData) {
             var data = employeeData || filteredData;
             var groups = {};
             data.forEach(function(r) {
                 var g = r.skillGroup || '未分类';
                 if (!groups[g]) {
-                    groups[g] = { count: 0, responseTime: 0, waitTime: 0, ratedCount: 0, verySatisfied: 0, satisfied: 0, normal: 0, dissatisfied: 0, veryDissatisfied: 0, badReviewOrders: 0, solved: 0, resolvedTotal: 0 };
+                    groups[g] = { count: 0, responseTime: 0, waitTime: 0, ratedCount: 0, verySatisfied: 0, satisfied: 0, normal: 0, dissatisfied: 0, veryDissatisfied: 0, badReviewOrders: 0, solved: 0, resolvedTotal: 0, badReviewRows: [] };
                 }
                 var d = groups[g];
                 d.count++;
@@ -1243,10 +1607,18 @@
                     else if (r.satisfaction === 2) d.dissatisfied++;
                     else if (r.satisfaction === 1) d.veryDissatisfied++;
                 }
-                if (r.satisfaction > 0 && r.satisfaction <= 3) d.badReviewOrders++;
+                if (r.satisfaction > 0 && r.satisfaction <= 3) {
+                    d.badReviewOrders++;
+                    d.badReviewRows.push(r);
+                }
                 var status = String(r.isSolved || '').trim();
                 if (status === '是' || status === '否') d.resolvedTotal++;
                 if (status === '是') d.solved++;
+            });
+
+            employeeSkillBadReviewCache = {};
+            Object.keys(groups).forEach(function(name) {
+                employeeSkillBadReviewCache[name.replace(/[^一-龥A-Za-z0-9]/g, '_')] = { name: name, rows: groups[name].badReviewRows };
             });
 
             var html = '<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse; font-size: 14px;">' +
@@ -1266,6 +1638,7 @@
                 var avgWait = d.count > 0 ? d.waitTime / d.count : 0;
                 var nss = d.ratedCount > 0 ? (d.verySatisfied - d.normal - d.dissatisfied - d.veryDissatisfied) / d.ratedCount * 100 : 0;
                 var resRate = d.resolvedTotal > 0 ? d.solved / d.resolvedTotal * 100 : 0;
+                var safeName = name.replace(/[^一-龥A-Za-z0-9]/g, '_');
                 html += '<tr style="border-bottom: 1px solid #e5e7eb;">' +
                     '<td style="padding: 10px; text-align: left; font-weight: 500;">' + name + '</td>' +
                     '<td style="padding: 10px; text-align: center;">' + d.count + '</td>' +
@@ -1273,11 +1646,12 @@
                     '<td style="padding: 10px; text-align: center;">' + formatTime(avgWait) + '</td>' +
                     '<td style="padding: 10px; text-align: center; color: ' + (nss >= 0 ? '#10b981' : '#ef4444') + '; font-weight: 600;">' + (d.ratedCount > 0 ? nss.toFixed(1) + '%' : '-') + '</td>' +
                     '<td style="padding: 10px; text-align: center;">' + (d.resolvedTotal > 0 ? resRate.toFixed(1) + '%' : '-') + '</td>' +
-                    '<td style="padding: 10px; text-align: center; color: ' + (d.badReviewOrders > 0 ? '#ef4444' : '#10b981') + '; font-weight: 600;">' + d.badReviewOrders + '</td>' +
+                    '<td style="padding: 10px; text-align: center; color: ' + (d.badReviewOrders > 0 ? '#ef4444' : '#10b981') + '; font-weight: 600; cursor: pointer; text-decoration: underline;" onclick="toggleEmployeeSkillBadReview(\'' + safeName + '\')" title="点击查看该技能组差评分布">' + d.badReviewOrders + '</td>' +
                     '</tr>';
             });
 
             html += '</tbody></table></div>';
+            html += '<div id="employeeSkillBadReviewDetail"></div>';
             document.getElementById('employeeSkillOverview').innerHTML = html;
         }
 
@@ -1301,6 +1675,12 @@
                 case 'week':
                     start = new Date(now); start.setDate(now.getDate() - now.getDay());
                     start.setHours(0, 0, 0, 0);
+                    break;
+                case 'lastWeek':
+                    start = new Date(now); start.setDate(now.getDate() - now.getDay() - 7);
+                    start.setHours(0, 0, 0, 0);
+                    end = new Date(now); end.setDate(now.getDate() - now.getDay() - 1);
+                    end.setHours(23, 59, 59, 999);
                     break;
                 case 'month':
                     start = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -1349,12 +1729,33 @@
             }
         });
         
+        function restoreFromDB() {
+            loadDataFromDB().then(function(payload) {
+                if (!payload || !payload.rawData || payload.rawData.length === 0) return;
+                rawData = payload.rawData;
+                filteredData = rawData.slice();
+                document.getElementById('uploadArea').style.display = 'none';
+                document.getElementById('dataInfo').style.display = 'flex';
+                document.getElementById('recordCount').textContent = rawData.length;
+                var staffIdSet = new Set(rawData.map(function(r) { return r.staffId || r.staffName; }).filter(Boolean));
+                document.getElementById('employeeCount').textContent = staffIdSet.size;
+                document.getElementById('filterBar').style.display = 'flex';
+                document.getElementById('mainTabs').style.display = 'flex';
+                document.getElementById('tabContent').style.display = 'block';
+                initDateRange();
+                populateEmployeeSelect();
+                populateWeaknessSelect();
+                refreshData();
+            }).catch(function() {});
+        }
+
         window.onload = function() {
             var savedTitle = localStorage.getItem('reportTitle');
             if (savedTitle) {
                 document.getElementById('mainTitle').textContent = savedTitle;
                 document.title = savedTitle + ' - 工单数据分析与管理工具';
             }
+            restoreFromDB();
         };
     </script>
 </body>
